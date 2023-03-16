@@ -2,12 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:generate go run -mod=mod mknode.go
+//go:generate go run mknode.go
 
 package ir
 
 import (
-	"cmd/compile/internal/base"
 	"cmd/compile/internal/types"
 	"cmd/internal/src"
 	"fmt"
@@ -28,7 +27,6 @@ import (
 // The embedding struct should also fill in n.op in its constructor,
 // for more useful panic messages when invalid methods are called,
 // instead of implementing Op itself.
-//
 type miniNode struct {
 	pos  src.XPos // uint32
 	op   Op       // uint8
@@ -66,8 +64,6 @@ func (n *miniNode) SetTypecheck(x uint8) {
 	}
 	n.bits.set2(miniTypecheckShift, x)
 }
-
-func (n *miniNode) SetDiag(x bool) { base.AssertfAt(!x, n.Pos(), "SetDiag") }
 
 func (n *miniNode) Walked() bool     { return n.bits&miniWalked != 0 }
 func (n *miniNode) SetWalked(x bool) { n.bits.set(miniWalked, x) }

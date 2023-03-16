@@ -5,29 +5,38 @@
 /*
 Package flag implements command-line flag parsing.
 
-Usage
+# Usage
 
 Define flags using flag.String(), Bool(), Int(), etc.
 
 This declares an integer flag, -n, stored in the pointer nFlag, with type *int:
+
 	import "flag"
 	var nFlag = flag.Int("n", 1234, "help message for flag n")
+
 If you like, you can bind the flag to a variable using the Var() functions.
+
 	var flagvar int
 	func init() {
 		flag.IntVar(&flagvar, "flagname", 1234, "help message for flagname")
 	}
+
 Or you can create custom flags that satisfy the Value interface (with
 pointer receivers) and couple them to flag parsing by
+
 	flag.Var(&flagVal, "name", "help message for flagname")
+
 For such flags, the default value is just the initial value of the variable.
 
 After all flags are defined, call
+
 	flag.Parse()
+
 to parse the command line into the defined flags.
 
 Flags may then be used directly. If you're using the flags themselves,
 they are all pointers; if you bind to variables, they're values.
+
 	fmt.Println("ip has value ", *ip)
 	fmt.Println("flagvar has value ", flagvar)
 
@@ -35,17 +44,21 @@ After parsing, the arguments following the flags are available as the
 slice flag.Args() or individually as flag.Arg(i).
 The arguments are indexed from 0 through flag.NArg()-1.
 
-Command line flag syntax
+# Command line flag syntax
 
 The following forms are permitted:
 
 	-flag
+	--flag   // double dashes are also permitted
 	-flag=x
 	-flag x  // non-boolean flags only
-One or two minus signs may be used; they are equivalent.
+
+One or two dashes may be used; they are equivalent.
 The last form is not permitted for boolean flags because the
 meaning of the command
+
 	cmd -x *
+
 where * is a Unix shell wildcard, will change if there is a file
 called 0, false, etc. You must use the -flag=false form to turn
 off a boolean flag.
@@ -55,7 +68,9 @@ Flag parsing stops just before the first non-flag argument
 
 Integer flags accept 1234, 0664, 0x1234 and may be negative.
 Boolean flags may be:
+
 	1, 0, t, f, T, F, true, false, TRUE, FALSE, True, False
+
 Duration flags accept any input valid for time.ParseDuration.
 
 The default set of command-line flags is controlled by
@@ -488,7 +503,7 @@ func Set(name, value string) error {
 
 // isZeroValue determines whether the string represents the zero
 // value for a flag.
-func isZeroValue(flag *Flag, value string) bool {
+func isZeroValue(flag *Flag, value string) (ok bool, err error) {
 	// Build a zero value of the flag's Value type, and see if the
 	// result of calling its String method equals the value passed in.
 	// This works unless the Value type is itself an interface type.
@@ -499,7 +514,18 @@ func isZeroValue(flag *Flag, value string) bool {
 	} else {
 		z = reflect.Zero(typ)
 	}
-	return value == z.Interface().(Value).String()
+	// Catch panics calling the String method, which shouldn't prevent the
+	// usage message from being printed, but that we should report to the
+	// user so that they know to fix their code.
+	defer func() {
+		if e := recover(); e != nil {
+			if typ.Kind() == reflect.Pointer {
+				typ = typ.Elem()
+			}
+			err = fmt.Errorf("panic calling String method on zero %v for flag %s: %v", typ, flag.Name, e)
+		}
+	}()
+	return value == z.Interface().(Value).String(), nil
 }
 
 // UnquoteUsage extracts a back-quoted name from the usage
@@ -524,9 +550,11 @@ func UnquoteUsage(flag *Flag) (name string, usage string) {
 	}
 	// No explicit name, so use type if we can find one.
 	name = "value"
-	switch flag.Value.(type) {
+	switch fv := flag.Value.(type) {
 	case boolFlag:
-		name = ""
+		if fv.IsBoolFlag() {
+			name = ""
+		}
 	case *durationValue:
 		name = "duration"
 	case *float64Value:
@@ -545,6 +573,7 @@ func UnquoteUsage(flag *Flag) (name string, usage string) {
 // default values of all defined command-line flags in the set. See the
 // documentation for the global function PrintDefaults for more information.
 func (f *FlagSet) PrintDefaults() {
+	var isZeroValueErrs []error
 	f.VisitAll(func(flag *Flag) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "  -%s", flag.Name) // Two spaces before -; see next two comments.
@@ -564,7 +593,11 @@ func (f *FlagSet) PrintDefaults() {
 		}
 		b.WriteString(strings.ReplaceAll(usage, "\n", "\n    \t"))
 
-		if !isZeroValue(flag, flag.DefValue) {
+		// Print the default value only if it differs to the zero value
+		// for this flag type.
+		if isZero, err := isZeroValue(flag, flag.DefValue); err != nil {
+			isZeroValueErrs = append(isZeroValueErrs, err)
+		} else if !isZero {
 			if _, ok := flag.Value.(*stringValue); ok {
 				// put quotes on the value
 				fmt.Fprintf(&b, " (default %q)", flag.DefValue)
@@ -574,14 +607,25 @@ func (f *FlagSet) PrintDefaults() {
 		}
 		fmt.Fprint(f.Output(), b.String(), "\n")
 	})
+	// If calling String on any zero flag.Values triggered a panic, print
+	// the messages after the full set of defaults so that the programmer
+	// knows to fix the panic.
+	if errs := isZeroValueErrs; len(errs) > 0 {
+		fmt.Fprintln(f.Output())
+		for _, err := range errs {
+			fmt.Fprintln(f.Output(), err)
+		}
+	}
 }
 
 // PrintDefaults prints, to standard error unless configured otherwise,
 // a usage message showing the default settings of all defined
 // command-line flags.
 // For an integer valued flag x, the default output has the form
+//
 //	-x int
 //		usage-message-for-x (default 7)
+//
 // The usage message will appear on a separate line for anything but
 // a bool flag with a one-byte name. For bool flags, the type is
 // omitted and if the flag name is one byte the usage message appears
@@ -591,8 +635,11 @@ func (f *FlagSet) PrintDefaults() {
 // string; the first such item in the message is taken to be a parameter
 // name to show in the message and the back quotes are stripped from
 // the message when displayed. For instance, given
+//
 //	flag.String("I", "", "search `directory` for include files")
+//
 // the output will be
+//
 //	-I directory
 //		search directory for include files.
 //
@@ -1009,9 +1056,9 @@ func (f *FlagSet) parseOne() (bool, error) {
 			break
 		}
 	}
-	m := f.formal
-	flag, alreadythere := m[name] // BUG
-	if !alreadythere {
+
+	flag, ok := f.formal[name]
+	if !ok {
 		if name == "help" || name == "h" { // special case for nice help message.
 			f.usage()
 			return false, ErrHelp

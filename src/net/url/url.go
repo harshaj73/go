@@ -351,11 +351,14 @@ func escape(s string, mode encoding) string {
 // Note that the Path field is stored in decoded form: /%47%6f%2f becomes /Go/.
 // A consequence is that it is impossible to tell which slashes in the Path were
 // slashes in the raw URL and which were %2f. This distinction is rarely important,
-// but when it is, the code should use RawPath, an optional field which only gets
-// set if the default encoding is different from Path.
+// but when it is, the code should use the EscapedPath method, which preserves
+// the original encoding of Path.
 //
-// URL's String method uses the EscapedPath method to obtain the path. See the
-// EscapedPath method for more details.
+// The RawPath field is an optional field which is only set when the default
+// encoding of Path is different from the escaped path. See the EscapedPath method
+// for more details.
+//
+// URL's String method uses the EscapedPath method to obtain the path.
 type URL struct {
 	Scheme      string
 	Opaque      string    // encoded opaque data
@@ -381,9 +384,9 @@ func User(username string) *Userinfo {
 //
 // This functionality should only be used with legacy web sites.
 // RFC 2396 warns that interpreting Userinfo this way
-// ``is NOT RECOMMENDED, because the passing of authentication
+// “is NOT RECOMMENDED, because the passing of authentication
 // information in clear text (such as URI) has proven to be a
-// security risk in almost every case where it has been used.''
+// security risk in almost every case where it has been used.”
 func UserPassword(username, password string) *Userinfo {
 	return &Userinfo{username, password, true}
 }
@@ -428,7 +431,7 @@ func (u *Userinfo) String() string {
 }
 
 // Maybe rawURL is of the form scheme:path.
-// (Scheme must be [a-zA-Z][a-zA-Z0-9+-.]*)
+// (Scheme must be [a-zA-Z][a-zA-Z0-9+.-]*)
 // If so, return scheme, path; else return "", rawURL.
 func getScheme(rawURL string) (scheme, path string, err error) {
 	for i := 0; i < len(rawURL); i++ {
@@ -793,15 +796,15 @@ func validOptionalPort(port string) bool {
 // To obtain the path, String uses u.EscapedPath().
 //
 // In the second form, the following rules apply:
-//	- if u.Scheme is empty, scheme: is omitted.
-//	- if u.User is nil, userinfo@ is omitted.
-//	- if u.Host is empty, host/ is omitted.
-//	- if u.Scheme and u.Host are empty and u.User is nil,
-//	   the entire scheme://userinfo@host/ is omitted.
-//	- if u.Host is non-empty and u.Path begins with a /,
-//	   the form host/path does not add its own /.
-//	- if u.RawQuery is empty, ?query is omitted.
-//	- if u.Fragment is empty, #fragment is omitted.
+//   - if u.Scheme is empty, scheme: is omitted.
+//   - if u.User is nil, userinfo@ is omitted.
+//   - if u.Host is empty, host/ is omitted.
+//   - if u.Scheme and u.Host are empty and u.User is nil,
+//     the entire scheme://userinfo@host/ is omitted.
+//   - if u.Host is non-empty and u.Path begins with a /,
+//     the form host/path does not add its own /.
+//   - if u.RawQuery is empty, ?query is omitted.
+//   - if u.Fragment is empty, #fragment is omitted.
 func (u *URL) String() string {
 	var buf strings.Builder
 	if u.Scheme != "" {
@@ -880,9 +883,6 @@ type Values map[string][]string
 // the empty string. To access multiple values, use the map
 // directly.
 func (v Values) Get(key string) string {
-	if v == nil {
-		return ""
-	}
 	vs := v[key]
 	if len(vs) == 0 {
 		return ""
@@ -960,7 +960,7 @@ func parseQuery(m Values, query string) (err error) {
 	return err
 }
 
-// Encode encodes the values into ``URL encoded'' form
+// Encode encodes the values into “URL encoded” form
 // ("bar=baz&foo=quux") sorted by key.
 func (v Values) Encode() string {
 	if v == nil {
@@ -1189,21 +1189,35 @@ func (u *URL) UnmarshalBinary(text []byte) error {
 
 // JoinPath returns a new URL with the provided path elements joined to
 // any existing path and the resulting path cleaned of any ./ or ../ elements.
+// Any sequences of multiple / characters will be reduced to a single /.
 func (u *URL) JoinPath(elem ...string) *URL {
-	url := *u
-	if len(elem) > 0 {
-		elem = append([]string{u.Path}, elem...)
-		url.setPath(path.Join(elem...))
+	elem = append([]string{u.EscapedPath()}, elem...)
+	var p string
+	if !strings.HasPrefix(elem[0], "/") {
+		// Return a relative path if u is relative,
+		// but ensure that it contains no ../ elements.
+		elem[0] = "/" + elem[0]
+		p = path.Join(elem...)[1:]
+	} else {
+		p = path.Join(elem...)
 	}
+	// path.Join will remove any trailing slashes.
+	// Preserve at least one.
+	if strings.HasSuffix(elem[len(elem)-1], "/") && !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	url := *u
+	url.setPath(p)
 	return &url
 }
 
 // validUserinfo reports whether s is a valid userinfo string per RFC 3986
 // Section 3.2.1:
-//     userinfo    = *( unreserved / pct-encoded / sub-delims / ":" )
-//     unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
-//     sub-delims  = "!" / "$" / "&" / "'" / "(" / ")"
-//                   / "*" / "+" / "," / ";" / "="
+//
+//	userinfo    = *( unreserved / pct-encoded / sub-delims / ":" )
+//	unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
+//	sub-delims  = "!" / "$" / "&" / "'" / "(" / ")"
+//	              / "*" / "+" / "," / ";" / "="
 //
 // It doesn't validate pct-encoded. The caller does that via func unescape.
 func validUserinfo(s string) bool {

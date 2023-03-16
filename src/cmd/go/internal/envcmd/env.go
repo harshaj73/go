@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package envcmd implements the ``go env'' command.
+// Package envcmd implements the “go env” command.
 package envcmd
 
 import (
@@ -57,6 +57,8 @@ For more about environment variables, see 'go help environment'.
 
 func init() {
 	CmdEnv.Run = runEnv // break init cycle
+	base.AddChdirFlag(&CmdEnv.Flag)
+	base.AddBuildFlagsNX(&CmdEnv.Flag)
 }
 
 var (
@@ -96,7 +98,7 @@ func MkEnv() []cfg.EnvVar {
 		{Name: "GOROOT", Value: cfg.GOROOT},
 		{Name: "GOSUMDB", Value: cfg.GOSUMDB},
 		{Name: "GOTMPDIR", Value: cfg.Getenv("GOTMPDIR")},
-		{Name: "GOTOOLDIR", Value: base.ToolDir},
+		{Name: "GOTOOLDIR", Value: build.ToolDir},
 		{Name: "GOVCS", Value: cfg.GOVCS},
 		{Name: "GOVERSION", Value: runtime.Version()},
 	}
@@ -174,8 +176,13 @@ func ExtraEnvVars() []cfg.EnvVar {
 // ExtraEnvVarsCostly returns environment variables that should not leak into child processes
 // but are costly to evaluate.
 func ExtraEnvVarsCostly() []cfg.EnvVar {
-	var b work.Builder
-	b.Init()
+	b := work.NewBuilder("")
+	defer func() {
+		if err := b.Close(); err != nil {
+			base.Fatalf("go: %v", err)
+		}
+	}()
+
 	cppflags, cflags, cxxflags, fflags, ldflags, err := b.CFlags(&load.Package{})
 	if err != nil {
 		// Should not happen - b.CFlags was given an empty package.
@@ -184,15 +191,23 @@ func ExtraEnvVarsCostly() []cfg.EnvVar {
 	}
 	cmd := b.GccCmd(".", "")
 
+	join := func(s []string) string {
+		q, err := quoted.Join(s)
+		if err != nil {
+			return strings.Join(s, " ")
+		}
+		return q
+	}
+
 	return []cfg.EnvVar{
 		// Note: Update the switch in runEnv below when adding to this list.
-		{Name: "CGO_CFLAGS", Value: strings.Join(cflags, " ")},
-		{Name: "CGO_CPPFLAGS", Value: strings.Join(cppflags, " ")},
-		{Name: "CGO_CXXFLAGS", Value: strings.Join(cxxflags, " ")},
-		{Name: "CGO_FFLAGS", Value: strings.Join(fflags, " ")},
-		{Name: "CGO_LDFLAGS", Value: strings.Join(ldflags, " ")},
+		{Name: "CGO_CFLAGS", Value: join(cflags)},
+		{Name: "CGO_CPPFLAGS", Value: join(cppflags)},
+		{Name: "CGO_CXXFLAGS", Value: join(cxxflags)},
+		{Name: "CGO_FFLAGS", Value: join(fflags)},
+		{Name: "CGO_LDFLAGS", Value: join(ldflags)},
 		{Name: "PKG_CONFIG", Value: b.PkgconfigCmd()},
-		{Name: "GOGCCFLAGS", Value: strings.Join(cmd[3:], " ")},
+		{Name: "GOGCCFLAGS", Value: join(cmd[3:])},
 	}
 }
 
@@ -264,6 +279,7 @@ func runEnv(ctx context.Context, cmd *base.Command, args []string) {
 		}
 	}
 	if needCostly {
+		work.BuildInit()
 		env = append(env, ExtraEnvVarsCostly()...)
 	}
 
@@ -304,11 +320,10 @@ func runEnvW(args []string) {
 	}
 	add := make(map[string]string)
 	for _, arg := range args {
-		i := strings.Index(arg, "=")
-		if i < 0 {
+		key, val, found := strings.Cut(arg, "=")
+		if !found {
 			base.Fatalf("go: arguments must be KEY=VALUE: invalid argument: %s", arg)
 		}
-		key, val := arg[:i], arg[i+1:]
 		if err := checkEnvWrite(key, val); err != nil {
 			base.Fatalf("go: %v", err)
 		}
@@ -439,8 +454,8 @@ func printEnvAsJSON(env []cfg.EnvVar) {
 
 func getOrigEnv(key string) string {
 	for _, v := range cfg.OrigEnv {
-		if strings.HasPrefix(v, key+"=") {
-			return strings.TrimPrefix(v, key+"=")
+		if v, found := strings.CutPrefix(v, key+"="); found {
+			return v
 		}
 	}
 	return ""

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package modget implements the module-aware ``go get'' command.
+// Package modget implements the module-aware “go get” command.
 package modget
 
 // The arguments to 'go get' are patterns with optional version queries, with
@@ -447,12 +447,17 @@ type resolver struct {
 
 	work *par.Queue
 
-	matchInModuleCache par.Cache
+	matchInModuleCache par.ErrCache[matchInModuleKey, []string]
 }
 
 type versionReason struct {
 	version string
 	reason  *query
+}
+
+type matchInModuleKey struct {
+	pattern string
+	m       module.Version
 }
 
 func newResolver(ctx context.Context, queries []*query) *resolver {
@@ -547,7 +552,7 @@ func (r *resolver) queryModule(ctx context.Context, mPath, query string, selecte
 	return module.Version{Path: mPath, Version: rev.Version}, nil
 }
 
-// queryPackage wraps modload.QueryPackage, substituting r.checkAllowedOr to
+// queryPackages wraps modload.QueryPackage, substituting r.checkAllowedOr to
 // decide allowed versions.
 func (r *resolver) queryPackages(ctx context.Context, pattern, query string, selected func(string) string) (pkgMods []module.Version, err error) {
 	results, err := modload.QueryPackages(ctx, pattern, query, selected, r.checkAllowedOr(query, selected))
@@ -592,24 +597,13 @@ func (r *resolver) checkAllowedOr(requested string, selected func(string) string
 
 // matchInModule is a caching wrapper around modload.MatchInModule.
 func (r *resolver) matchInModule(ctx context.Context, pattern string, m module.Version) (packages []string, err error) {
-	type key struct {
-		pattern string
-		m       module.Version
-	}
-	type entry struct {
-		packages []string
-		err      error
-	}
-
-	e := r.matchInModuleCache.Do(key{pattern, m}, func() any {
+	return r.matchInModuleCache.Do(matchInModuleKey{pattern, m}, func() ([]string, error) {
 		match := modload.MatchInModule(ctx, pattern, m, imports.AnyTags())
 		if len(match.Errs) > 0 {
-			return entry{match.Pkgs, match.Errs[0]}
+			return match.Pkgs, match.Errs[0]
 		}
-		return entry{match.Pkgs, nil}
-	}).(entry)
-
-	return e.packages, e.err
+		return match.Pkgs, nil
+	})
 }
 
 // queryNone adds a candidate set to q for each module matching q.pattern.
@@ -731,10 +725,10 @@ func (r *resolver) performWildcardQueries(ctx context.Context) {
 }
 
 // queryWildcard adds a candidate set to q for each module for which:
-// 	- some version of the module is already in the build list, and
-// 	- that module exists at some version matching q.version, and
-// 	- either the module path itself matches q.pattern, or some package within
-// 	  the module at q.version matches q.pattern.
+//   - some version of the module is already in the build list, and
+//   - that module exists at some version matching q.version, and
+//   - either the module path itself matches q.pattern, or some package within
+//     the module at q.version matches q.pattern.
 func (r *resolver) queryWildcard(ctx context.Context, q *query) {
 	// For wildcard patterns, modload.QueryPattern only identifies modules
 	// matching the prefix of the path before the wildcard. However, the build

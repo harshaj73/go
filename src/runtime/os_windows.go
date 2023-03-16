@@ -28,6 +28,7 @@ const (
 //go:cgo_import_dynamic runtime._ExitProcess ExitProcess%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._FreeEnvironmentStringsW FreeEnvironmentStringsW%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._GetConsoleMode GetConsoleMode%2 "kernel32.dll"
+//go:cgo_import_dynamic runtime._GetCurrentThreadId GetCurrentThreadId%0 "kernel32.dll"
 //go:cgo_import_dynamic runtime._GetEnvironmentStringsW GetEnvironmentStringsW%0 "kernel32.dll"
 //go:cgo_import_dynamic runtime._GetProcAddress GetProcAddress%2 "kernel32.dll"
 //go:cgo_import_dynamic runtime._GetProcessAffinityMask GetProcessAffinityMask%3 "kernel32.dll"
@@ -37,8 +38,8 @@ const (
 //go:cgo_import_dynamic runtime._GetSystemInfo GetSystemInfo%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._GetThreadContext GetThreadContext%2 "kernel32.dll"
 //go:cgo_import_dynamic runtime._SetThreadContext SetThreadContext%2 "kernel32.dll"
+//go:cgo_import_dynamic runtime._LoadLibraryExW LoadLibraryExW%3 "kernel32.dll"
 //go:cgo_import_dynamic runtime._LoadLibraryW LoadLibraryW%1 "kernel32.dll"
-//go:cgo_import_dynamic runtime._LoadLibraryA LoadLibraryA%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._PostQueuedCompletionStatus PostQueuedCompletionStatus%4 "kernel32.dll"
 //go:cgo_import_dynamic runtime._ResumeThread ResumeThread%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._SetConsoleCtrlHandler SetConsoleCtrlHandler%2 "kernel32.dll"
@@ -78,6 +79,7 @@ var (
 	_ExitProcess,
 	_FreeEnvironmentStringsW,
 	_GetConsoleMode,
+	_GetCurrentThreadId,
 	_GetEnvironmentStringsW,
 	_GetProcAddress,
 	_GetProcessAffinityMask,
@@ -88,8 +90,8 @@ var (
 	_GetSystemTimeAsFileTime,
 	_GetThreadContext,
 	_SetThreadContext,
+	_LoadLibraryExW,
 	_LoadLibraryW,
-	_LoadLibraryA,
 	_PostQueuedCompletionStatus,
 	_QueryPerformanceCounter,
 	_QueryPerformanceFrequency,
@@ -116,10 +118,7 @@ var (
 
 	// Following syscalls are only available on some Windows PCs.
 	// We will load syscalls, if available, before using them.
-	_AddDllDirectory,
 	_AddVectoredContinueHandler,
-	_LoadLibraryExA,
-	_LoadLibraryExW,
 	_ stdFunction
 
 	// Use RtlGenRandom to generate cryptographically random data.
@@ -144,6 +143,15 @@ var (
 	_timeEndPeriod,
 	_WSAGetOverlappedResult,
 	_ stdFunction
+)
+
+var (
+	advapi32dll = [...]uint16{'a', 'd', 'v', 'a', 'p', 'i', '3', '2', '.', 'd', 'l', 'l', 0}
+	kernel32dll = [...]uint16{'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0}
+	ntdlldll    = [...]uint16{'n', 't', 'd', 'l', 'l', '.', 'd', 'l', 'l', 0}
+	powrprofdll = [...]uint16{'p', 'o', 'w', 'r', 'p', 'r', 'o', 'f', '.', 'd', 'l', 'l', 0}
+	winmmdll    = [...]uint16{'w', 'i', 'n', 'm', 'm', '.', 'd', 'l', 'l', 0}
+	ws2_32dll   = [...]uint16{'w', 's', '2', '_', '3', '2', '.', 'd', 'l', 'l', 0}
 )
 
 // Function to be called by windows CreateThread
@@ -225,46 +233,35 @@ const _MAX_PATH = 260 // https://docs.microsoft.com/en-us/windows/win32/fileio/m
 var sysDirectory [_MAX_PATH + 1]byte
 var sysDirectoryLen uintptr
 
-func windowsLoadSystemLib(name []byte) uintptr {
-	if sysDirectoryLen == 0 {
-		l := stdcall2(_GetSystemDirectoryA, uintptr(unsafe.Pointer(&sysDirectory[0])), uintptr(len(sysDirectory)-1))
-		if l == 0 || l > uintptr(len(sysDirectory)-1) {
-			throw("Unable to determine system directory")
-		}
-		sysDirectory[l] = '\\'
-		sysDirectoryLen = l + 1
+func initSysDirectory() {
+	l := stdcall2(_GetSystemDirectoryA, uintptr(unsafe.Pointer(&sysDirectory[0])), uintptr(len(sysDirectory)-1))
+	if l == 0 || l > uintptr(len(sysDirectory)-1) {
+		throw("Unable to determine system directory")
 	}
-	if useLoadLibraryEx {
-		return stdcall3(_LoadLibraryExA, uintptr(unsafe.Pointer(&name[0])), 0, _LOAD_LIBRARY_SEARCH_SYSTEM32)
-	} else {
-		absName := append(sysDirectory[:sysDirectoryLen], name...)
-		return stdcall1(_LoadLibraryA, uintptr(unsafe.Pointer(&absName[0])))
-	}
+	sysDirectory[l] = '\\'
+	sysDirectoryLen = l + 1
+}
+
+func windowsLoadSystemLib(name []uint16) uintptr {
+	return stdcall3(_LoadLibraryExW, uintptr(unsafe.Pointer(&name[0])), 0, _LOAD_LIBRARY_SEARCH_SYSTEM32)
 }
 
 const haveCputicksAsm = GOARCH == "386" || GOARCH == "amd64"
 
 func loadOptionalSyscalls() {
-	var kernel32dll = []byte("kernel32.dll\000")
-	k32 := stdcall1(_LoadLibraryA, uintptr(unsafe.Pointer(&kernel32dll[0])))
+	k32 := windowsLoadSystemLib(kernel32dll[:])
 	if k32 == 0 {
 		throw("kernel32.dll not found")
 	}
-	_AddDllDirectory = windowsFindfunc(k32, []byte("AddDllDirectory\000"))
 	_AddVectoredContinueHandler = windowsFindfunc(k32, []byte("AddVectoredContinueHandler\000"))
-	_LoadLibraryExA = windowsFindfunc(k32, []byte("LoadLibraryExA\000"))
-	_LoadLibraryExW = windowsFindfunc(k32, []byte("LoadLibraryExW\000"))
-	useLoadLibraryEx = (_LoadLibraryExW != nil && _LoadLibraryExA != nil && _AddDllDirectory != nil)
 
-	var advapi32dll = []byte("advapi32.dll\000")
-	a32 := windowsLoadSystemLib(advapi32dll)
+	a32 := windowsLoadSystemLib(advapi32dll[:])
 	if a32 == 0 {
 		throw("advapi32.dll not found")
 	}
 	_RtlGenRandom = windowsFindfunc(a32, []byte("SystemFunction036\000"))
 
-	var ntdll = []byte("ntdll.dll\000")
-	n32 := windowsLoadSystemLib(ntdll)
+	n32 := windowsLoadSystemLib(ntdlldll[:])
 	if n32 == 0 {
 		throw("ntdll.dll not found")
 	}
@@ -279,8 +276,7 @@ func loadOptionalSyscalls() {
 		}
 	}
 
-	var winmmdll = []byte("winmm.dll\000")
-	m32 := windowsLoadSystemLib(winmmdll)
+	m32 := windowsLoadSystemLib(winmmdll[:])
 	if m32 == 0 {
 		throw("winmm.dll not found")
 	}
@@ -290,8 +286,7 @@ func loadOptionalSyscalls() {
 		throw("timeBegin/EndPeriod not found")
 	}
 
-	var ws232dll = []byte("ws2_32.dll\000")
-	ws232 := windowsLoadSystemLib(ws232dll)
+	ws232 := windowsLoadSystemLib(ws2_32dll[:])
 	if ws232 == 0 {
 		throw("ws2_32.dll not found")
 	}
@@ -315,7 +310,7 @@ func monitorSuspendResume() {
 		context  uintptr
 	}
 
-	powrprof := windowsLoadSystemLib([]byte("powrprof.dll\000"))
+	powrprof := windowsLoadSystemLib(powrprofdll[:])
 	if powrprof == 0 {
 		return // Running on Windows 7, where we don't need it anyway.
 	}
@@ -389,22 +384,6 @@ const (
 // in sys_windows_386.s and sys_windows_amd64.s:
 func getlasterror() uint32
 
-// When loading DLLs, we prefer to use LoadLibraryEx with
-// LOAD_LIBRARY_SEARCH_* flags, if available. LoadLibraryEx is not
-// available on old Windows, though, and the LOAD_LIBRARY_SEARCH_*
-// flags are not available on some versions of Windows without a
-// security patch.
-//
-// https://msdn.microsoft.com/en-us/library/ms684179(v=vs.85).aspx says:
-// "Windows 7, Windows Server 2008 R2, Windows Vista, and Windows
-// Server 2008: The LOAD_LIBRARY_SEARCH_* flags are available on
-// systems that have KB2533623 installed. To determine whether the
-// flags are available, use GetProcAddress to get the address of the
-// AddDllDirectory, RemoveDllDirectory, or SetDefaultDllDirectories
-// function. If GetProcAddress succeeds, the LOAD_LIBRARY_SEARCH_*
-// flags can be used with LoadLibraryEx."
-var useLoadLibraryEx bool
-
 var timeBeginPeriodRetValue uint32
 
 // osRelaxMinNS indicates that sysmon shouldn't osRelax if the next
@@ -461,13 +440,7 @@ func createHighResTimer() uintptr {
 		_SYNCHRONIZE|_TIMER_QUERY_STATE|_TIMER_MODIFY_STATE)
 }
 
-const highResTimerSupported = GOARCH == "386" || GOARCH == "amd64"
-
 func initHighResTimer() {
-	if !highResTimerSupported {
-		// TODO: Not yet implemented.
-		return
-	}
 	h := createHighResTimer()
 	if h != 0 {
 		haveHighResTimer = true
@@ -546,8 +519,6 @@ func initLongPathSupport() {
 func osinit() {
 	asmstdcallAddr = unsafe.Pointer(abi.FuncPCABI0(asmstdcall))
 
-	setBadSignalMsg()
-
 	loadOptionalSyscalls()
 
 	disableWER()
@@ -557,6 +528,7 @@ func osinit() {
 	initHighResTimer()
 	timeBeginPeriodRetValue = osRelax(false)
 
+	initSysDirectory()
 	initLongPathSupport()
 
 	ncpu = getproccount()
@@ -902,6 +874,7 @@ func semacreate(mp *m) {
 // May run with m.p==nil, so write barriers are not allowed. This
 // function is called by newosproc0, so it is also required to
 // operate without stack guards.
+//
 //go:nowritebarrierrec
 //go:nosplit
 func newosproc(mp *m) {
@@ -930,6 +903,7 @@ func newosproc(mp *m) {
 // Used by the C library build mode. On Linux this function would allocate a
 // stack, but that's not necessary for Windows. No stack guards are present
 // and the GC has not been initialized, so write barriers will fail.
+//
 //go:nowritebarrierrec
 //go:nosplit
 func newosproc0(mp *m, stk unsafe.Pointer) {
@@ -939,7 +913,7 @@ func newosproc0(mp *m, stk unsafe.Pointer) {
 	throw("bad newosproc0")
 }
 
-func exitThread(wait *uint32) {
+func exitThread(wait *atomic.Uint32) {
 	// We should never reach exitThread on Windows because we let
 	// the OS clean up threads.
 	throw("exitThread")
@@ -979,6 +953,7 @@ func minit() {
 	mp := getg().m
 	lock(&mp.threadLock)
 	mp.thread = thandle
+	mp.procid = uint64(stdcall0(_GetCurrentThreadId))
 
 	// Configure usleep timer, if possible.
 	if mp.highResTimer == 0 && haveHighResTimer {
@@ -1019,6 +994,7 @@ func minit() {
 }
 
 // Called from dropm to undo the effect of an minit.
+//
 //go:nosplit
 func unminit() {
 	mp := getg().m
@@ -1032,6 +1008,7 @@ func unminit() {
 
 // Called from exitm, but not from drop, to undo the effect of thread-owned
 // resources in minit, semacreate, or elsewhere. Do not take locks after calling this.
+//
 //go:nosplit
 func mdestroy(mp *m) {
 	if mp.highResTimer != 0 {
@@ -1050,6 +1027,7 @@ func mdestroy(mp *m) {
 
 // Calling stdcall on os stack.
 // May run during STW, so write barriers are not allowed.
+//
 //go:nowritebarrier
 //go:nosplit
 func stdcall(fn stdFunction) uintptr {
@@ -1146,7 +1124,6 @@ func stdcall7(fn stdFunction, a0, a1, a2, a3, a4, a5, a6 uintptr) uintptr {
 
 // These must run on the system stack only.
 func usleep2(dt int32)
-func usleep2HighRes(dt int32)
 func switchtothread()
 
 //go:nosplit
@@ -1168,13 +1145,15 @@ func usleep_no_g(us uint32) {
 //go:nosplit
 func usleep(us uint32) {
 	systemstack(func() {
-		dt := -10 * int32(us) // relative sleep (negative), 100ns units
+		dt := -10 * int64(us) // relative sleep (negative), 100ns units
 		// If the high-res timer is available and its handle has been allocated for this m, use it.
 		// Otherwise fall back to the low-res one, which doesn't need a handle.
 		if haveHighResTimer && getg().m.highResTimer != 0 {
-			usleep2HighRes(dt)
+			h := getg().m.highResTimer
+			stdcall6(_SetWaitableTimer, h, uintptr(unsafe.Pointer(&dt)), 0, 0, 0, 0)
+			stdcall3(_NtWaitForSingleObject, h, 0, 0)
 		} else {
-			usleep2(dt)
+			usleep2(int32(dt))
 		}
 	})
 }
@@ -1321,7 +1300,7 @@ func preemptM(mp *m) {
 	if !atomic.Cas(&mp.preemptExtLock, 0, 1) {
 		// External code is running. Fail the preemption
 		// attempt.
-		atomic.Xadd(&mp.preemptGen, 1)
+		mp.preemptGen.Add(1)
 		return
 	}
 
@@ -1331,7 +1310,7 @@ func preemptM(mp *m) {
 		// The M hasn't been minit'd yet (or was just unminit'd).
 		unlock(&mp.threadLock)
 		atomic.Store(&mp.preemptExtLock, 0)
-		atomic.Xadd(&mp.preemptGen, 1)
+		mp.preemptGen.Add(1)
 		return
 	}
 	var thread uintptr
@@ -1361,7 +1340,7 @@ func preemptM(mp *m) {
 		atomic.Store(&mp.preemptExtLock, 0)
 		// The thread no longer exists. This shouldn't be
 		// possible, but just acknowledge the request.
-		atomic.Xadd(&mp.preemptGen, 1)
+		mp.preemptGen.Add(1)
 		return
 	}
 
@@ -1426,7 +1405,7 @@ func preemptM(mp *m) {
 	atomic.Store(&mp.preemptExtLock, 0)
 
 	// Acknowledge the preemption.
-	atomic.Xadd(&mp.preemptGen, 1)
+	mp.preemptGen.Add(1)
 
 	stdcall1(_ResumeThread, thread)
 	stdcall1(_CloseHandle, thread)

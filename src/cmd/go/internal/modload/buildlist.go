@@ -9,6 +9,7 @@ import (
 	"cmd/go/internal/cfg"
 	"cmd/go/internal/mvs"
 	"cmd/go/internal/par"
+	"cmd/go/internal/slices"
 	"context"
 	"fmt"
 	"os"
@@ -22,11 +23,6 @@ import (
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 )
-
-// capVersionSlice returns s with its cap reduced to its length.
-func capVersionSlice(s []module.Version) []module.Version {
-	return s[:len(s):len(s)]
-}
 
 // A Requirements represents a logically-immutable set of root module requirements.
 type Requirements struct {
@@ -73,8 +69,8 @@ type Requirements struct {
 	// nested module back into a parent module).
 	direct map[string]bool
 
-	graphOnce sync.Once    // guards writes to (but not reads from) graph
-	graph     atomic.Value // cachedGraph
+	graphOnce sync.Once // guards writes to (but not reads from) graph
+	graph     atomic.Pointer[cachedGraph]
 }
 
 // A cachedGraph is a non-nil *ModuleGraph, together with any error discovered
@@ -108,7 +104,7 @@ func newRequirements(pruning modPruning, rootModules []module.Version, direct ma
 	if pruning == workspace {
 		return &Requirements{
 			pruning:        pruning,
-			rootModules:    capVersionSlice(rootModules),
+			rootModules:    slices.Clip(rootModules),
 			maxRootVersion: nil,
 			direct:         direct,
 		}
@@ -135,7 +131,7 @@ func newRequirements(pruning modPruning, rootModules []module.Version, direct ma
 
 	rs := &Requirements{
 		pruning:        pruning,
-		rootModules:    capVersionSlice(rootModules),
+		rootModules:    slices.Clip(rootModules),
 		maxRootVersion: make(map[string]string, len(rootModules)),
 		direct:         direct,
 	}
@@ -199,7 +195,7 @@ func (rs *Requirements) initVendor(vendorList []module.Version) {
 			mg.g.Require(vendorMod, vendorList)
 		}
 
-		rs.graph.Store(cachedGraph{mg, nil})
+		rs.graph.Store(&cachedGraph{mg, nil})
 	})
 }
 
@@ -240,9 +236,9 @@ func (rs *Requirements) hasRedundantRoot() bool {
 func (rs *Requirements) Graph(ctx context.Context) (*ModuleGraph, error) {
 	rs.graphOnce.Do(func() {
 		mg, mgErr := readModGraph(ctx, rs.pruning, rs.rootModules)
-		rs.graph.Store(cachedGraph{mg, mgErr})
+		rs.graph.Store(&cachedGraph{mg, mgErr})
 	})
-	cached := rs.graph.Load().(cachedGraph)
+	cached := rs.graph.Load()
 	return cached.mg, cached.err
 }
 
@@ -259,17 +255,10 @@ func (rs *Requirements) IsDirect(path string) bool {
 // transitive dependencies of non-root (implicit) dependencies.
 type ModuleGraph struct {
 	g         *mvs.Graph
-	loadCache par.Cache // module.Version → summaryError
+	loadCache par.ErrCache[module.Version, *modFileSummary]
 
 	buildListOnce sync.Once
 	buildList     []module.Version
-}
-
-// A summaryError is either a non-nil modFileSummary or a non-nil error
-// encountered while reading or parsing that summary.
-type summaryError struct {
-	summary *modFileSummary
-	err     error
 }
 
 var readModGraphDebugOnce sync.Once
@@ -326,7 +315,7 @@ func readModGraph(ctx context.Context, pruning modPruning, roots []module.Versio
 	// It does not load the transitive requirements of m even if the go version in
 	// m's go.mod file indicates that it supports graph pruning.
 	loadOne := func(m module.Version) (*modFileSummary, error) {
-		cached := mg.loadCache.Do(m, func() any {
+		return mg.loadCache.Do(m, func() (*modFileSummary, error) {
 			summary, err := goModSummary(m)
 
 			mu.Lock()
@@ -337,10 +326,8 @@ func readModGraph(ctx context.Context, pruning modPruning, roots []module.Versio
 			}
 			mu.Unlock()
 
-			return summaryError{summary, err}
-		}).(summaryError)
-
-		return cached.summary, cached.err
+			return summary, err
+		})
 	}
 
 	var enqueue func(m module.Version, pruning modPruning)
@@ -397,7 +384,6 @@ func readModGraph(ctx context.Context, pruning modPruning, roots []module.Versio
 		seen := map[module.Version]bool{}
 		for _, m := range roots {
 			hasDepsInAll[m.Path] = true
-			seen[m] = true
 		}
 		// This loop will terminate because it will call enqueue on each version of
 		// each dependency of the modules in hasDepsInAll at most once (and only
@@ -406,11 +392,11 @@ func readModGraph(ctx context.Context, pruning modPruning, roots []module.Versio
 			needsEnqueueing := map[module.Version]bool{}
 			for p := range hasDepsInAll {
 				m := module.Version{Path: p, Version: mg.g.Selected(p)}
-				reqs, ok := mg.g.RequiredBy(m)
-				if !ok {
+				if !seen[m] {
 					needsEnqueueing[m] = true
 					continue
 				}
+				reqs, _ := mg.g.RequiredBy(m)
 				for _, r := range reqs {
 					s := module.Version{Path: r.Path, Version: mg.g.Selected(r.Path)}
 					if cmpVersion(s.Version, r.Version) > 0 && !seen[s] {
@@ -471,18 +457,18 @@ func (mg *ModuleGraph) WalkBreadthFirst(f func(m module.Version)) {
 // and may rely on it not to be modified.
 func (mg *ModuleGraph) BuildList() []module.Version {
 	mg.buildListOnce.Do(func() {
-		mg.buildList = capVersionSlice(mg.g.BuildList())
+		mg.buildList = slices.Clip(mg.g.BuildList())
 	})
 	return mg.buildList
 }
 
 func (mg *ModuleGraph) findError() error {
 	errStack := mg.g.FindPath(func(m module.Version) bool {
-		cached := mg.loadCache.Get(m)
-		return cached != nil && cached.(summaryError).err != nil
+		_, err := mg.loadCache.Get(m)
+		return err != nil && err != par.ErrCacheEntryNotFound
 	})
 	if len(errStack) > 0 {
-		err := mg.loadCache.Get(errStack[len(errStack)-1]).(summaryError).err
+		_, err := mg.loadCache.Get(errStack[len(errStack)-1])
 		var noUpgrade func(from, to module.Version) bool
 		return mvs.NewBuildListError(err, errStack, noUpgrade)
 	}
@@ -676,11 +662,11 @@ func updateWorkspaceRoots(ctx context.Context, rs *Requirements, add []module.Ve
 // invariants of the go.mod file needed to support graph pruning for the given
 // packages:
 //
-// 	1. For each package marked with pkgInAll, the module path that provided that
-// 	   package is included as a root.
-// 	2. For all packages, the module that provided that package either remains
-// 	   selected at the same version or is upgraded by the dependencies of a
-// 	   root.
+//  1. For each package marked with pkgInAll, the module path that provided that
+//     package is included as a root.
+//  2. For all packages, the module that provided that package either remains
+//     selected at the same version or is upgraded by the dependencies of a
+//     root.
 //
 // If any module that provided a package has been upgraded above its previous
 // version, the caller may need to reload and recompute the package graph.
@@ -769,17 +755,17 @@ func tidyPrunedRoots(ctx context.Context, mainModule module.Version, direct map[
 // updatePrunedRoots returns a set of root requirements that maintains the
 // invariants of the go.mod file needed to support graph pruning:
 //
-// 	1. The selected version of the module providing each package marked with
-// 	   either pkgInAll or pkgIsRoot is included as a root.
-// 	   Note that certain root patterns (such as '...') may explode the root set
-// 	   to contain every module that provides any package imported (or merely
-// 	   required) by any other module.
-// 	2. Each root appears only once, at the selected version of its path
-// 	   (if rs.graph is non-nil) or at the highest version otherwise present as a
-// 	   root (otherwise).
-// 	3. Every module path that appears as a root in rs remains a root.
-// 	4. Every version in add is selected at its given version unless upgraded by
-// 	   (the dependencies of) an existing root or another module in add.
+//  1. The selected version of the module providing each package marked with
+//     either pkgInAll or pkgIsRoot is included as a root.
+//     Note that certain root patterns (such as '...') may explode the root set
+//     to contain every module that provides any package imported (or merely
+//     required) by any other module.
+//  2. Each root appears only once, at the selected version of its path
+//     (if rs.graph is non-nil) or at the highest version otherwise present as a
+//     root (otherwise).
+//  3. Every module path that appears as a root in rs remains a root.
+//  4. Every version in add is selected at its given version unless upgraded by
+//     (the dependencies of) an existing root or another module in add.
 //
 // The packages in pkgs are assumed to have been loaded from either the roots of
 // rs or the modules selected in the graph of rs.
@@ -787,26 +773,26 @@ func tidyPrunedRoots(ctx context.Context, mainModule module.Version, direct map[
 // The above invariants together imply the graph-pruning invariants for the
 // go.mod file:
 //
-// 	1. (The import invariant.) Every module that provides a package transitively
-// 	   imported by any package or test in the main module is included as a root.
-// 	   This follows by induction from (1) and (3) above. Transitively-imported
-// 	   packages loaded during this invocation are marked with pkgInAll (1),
-// 	   and by hypothesis any transitively-imported packages loaded in previous
-// 	   invocations were already roots in rs (3).
+//  1. (The import invariant.) Every module that provides a package transitively
+//     imported by any package or test in the main module is included as a root.
+//     This follows by induction from (1) and (3) above. Transitively-imported
+//     packages loaded during this invocation are marked with pkgInAll (1),
+//     and by hypothesis any transitively-imported packages loaded in previous
+//     invocations were already roots in rs (3).
 //
-// 	2. (The argument invariant.) Every module that provides a package matching
-// 	   an explicit package pattern is included as a root. This follows directly
-// 	   from (1): packages matching explicit package patterns are marked with
-// 	   pkgIsRoot.
+//  2. (The argument invariant.) Every module that provides a package matching
+//     an explicit package pattern is included as a root. This follows directly
+//     from (1): packages matching explicit package patterns are marked with
+//     pkgIsRoot.
 //
-// 	3. (The completeness invariant.) Every module that contributed any package
-// 	   to the build is required by either the main module or one of the modules
-// 	   it requires explicitly. This invariant is left up to the caller, who must
-// 	   not load packages from outside the module graph but may add roots to the
-// 	   graph, but is facilited by (3). If the caller adds roots to the graph in
-// 	   order to resolve missing packages, then updatePrunedRoots will retain them,
-// 	   the selected versions of those roots cannot regress, and they will
-// 	   eventually be written back to the main module's go.mod file.
+//  3. (The completeness invariant.) Every module that contributed any package
+//     to the build is required by either the main module or one of the modules
+//     it requires explicitly. This invariant is left up to the caller, who must
+//     not load packages from outside the module graph but may add roots to the
+//     graph, but is facilited by (3). If the caller adds roots to the graph in
+//     order to resolve missing packages, then updatePrunedRoots will retain them,
+//     the selected versions of those roots cannot regress, and they will
+//     eventually be written back to the main module's go.mod file.
 //
 // (See https://golang.org/design/36460-lazy-module-loading#invariants for more
 // detail.)
@@ -1162,14 +1148,14 @@ func tidyUnprunedRoots(ctx context.Context, mainModule module.Version, direct ma
 //
 // The roots are updated such that:
 //
-// 	1. The selected version of every module path in direct is included as a root
-// 	   (if it is not "none").
-// 	2. Each root is the selected version of its path. (We say that such a root
-// 	   set is “consistent”.)
-// 	3. Every version selected in the graph of rs remains selected unless upgraded
-// 	   by a dependency in add.
-// 	4. Every version in add is selected at its given version unless upgraded by
-// 	   (the dependencies of) an existing root or another module in add.
+//  1. The selected version of every module path in direct is included as a root
+//     (if it is not "none").
+//  2. Each root is the selected version of its path. (We say that such a root
+//     set is “consistent”.)
+//  3. Every version selected in the graph of rs remains selected unless upgraded
+//     by a dependency in add.
+//  4. Every version in add is selected at its given version unless upgraded by
+//     (the dependencies of) an existing root or another module in add.
 func updateUnprunedRoots(ctx context.Context, direct map[string]bool, rs *Requirements, add []module.Version) (*Requirements, error) {
 	mg, err := rs.Graph(ctx)
 	if err != nil {

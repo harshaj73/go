@@ -49,9 +49,12 @@ type ProtocolError struct {
 func (pe *ProtocolError) Error() string { return pe.ErrorString }
 
 var (
-	// ErrNotSupported is returned by the Push method of Pusher
-	// implementations to indicate that HTTP/2 Push support is not
-	// available.
+	// ErrNotSupported indicates that a feature is not supported.
+	//
+	// It is returned by ResponseController methods to indicate that
+	// the handler does not support the method, and by the Push method
+	// of Pusher implementations to indicate that HTTP/2 Push support
+	// is not available.
 	ErrNotSupported = &ProtocolError{"feature not supported"}
 
 	// Deprecated: ErrUnexpectedTrailer is no longer returned by
@@ -317,14 +320,14 @@ type Request struct {
 	Response *Response
 
 	// ctx is either the client or server context. It should only
-	// be modified via copying the whole Request using WithContext.
+	// be modified via copying the whole Request using Clone or WithContext.
 	// It is unexported to prevent people from using Context wrong
 	// and mutating the contexts held by callers of the same request.
 	ctx context.Context
 }
 
 // Context returns the request's context. To change the context, use
-// WithContext.
+// Clone or WithContext.
 //
 // The returned context is always non-nil; it defaults to the
 // background context.
@@ -349,9 +352,7 @@ func (r *Request) Context() context.Context {
 // sending the request, and reading the response headers and body.
 //
 // To create a new request with a context, use NewRequestWithContext.
-// To change the context of a request, such as an incoming request you
-// want to modify before sending back out, use Request.Clone. Between
-// those two uses, it's rare to need WithContext.
+// To make a deep copy of a request with a new context, use Request.Clone.
 func (r *Request) WithContext(ctx context.Context) *Request {
 	if ctx == nil {
 		panic("nil context")
@@ -359,7 +360,6 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 	r2 := new(Request)
 	*r2 = *r
 	r2.ctx = ctx
-	r2.URL = cloneURL(r.URL) // legacy behavior; TODO: try to remove. Issue 23544
 	return r2
 }
 
@@ -419,6 +419,9 @@ var ErrNoCookie = errors.New("http: named cookie not present")
 // If multiple cookies match the given name, only one cookie will
 // be returned.
 func (r *Request) Cookie(name string) (*Cookie, error) {
+	if name == "" {
+		return nil, ErrNoCookie
+	}
 	for _, c := range readCookies(r.Header, name) {
 		return c, nil
 	}
@@ -516,6 +519,7 @@ const defaultUserAgent = "Go-http-client/1.1"
 
 // Write writes an HTTP/1.1 request, which is the header and body, in wire format.
 // This method consults the following fields of the request:
+//
 //	Host
 //	URL
 //	Method (defaults to "GET")
@@ -739,9 +743,11 @@ func idnaASCII(v string) (string, error) {
 // into Punycode form, if necessary.
 //
 // Ideally we'd clean the Host header according to the spec:
-//   https://tools.ietf.org/html/rfc7230#section-5.4 (Host = uri-host [ ":" port ]")
-//   https://tools.ietf.org/html/rfc7230#section-2.7 (uri-host -> rfc3986's host)
-//   https://tools.ietf.org/html/rfc3986#section-3.2.2 (definition of host)
+//
+//	https://tools.ietf.org/html/rfc7230#section-5.4 (Host = uri-host [ ":" port ]")
+//	https://tools.ietf.org/html/rfc7230#section-2.7 (uri-host -> rfc3986's host)
+//	https://tools.ietf.org/html/rfc3986#section-3.2.2 (definition of host)
+//
 // But practically, what we are trying to avoid is the situation in
 // issue 11206, where a malformed Host header used in the proxy context
 // would create a bad request. So it is enough to just truncate at the
@@ -1027,6 +1033,8 @@ func ReadRequest(b *bufio.Reader) (*Request, error) {
 
 func readRequest(b *bufio.Reader) (req *Request, err error) {
 	tp := newTextprotoReader(b)
+	defer putTextprotoReader(tp)
+
 	req = new(Request)
 
 	// First line: GET /index.html HTTP/1.0
@@ -1035,7 +1043,6 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 		return nil, err
 	}
 	defer func() {
-		putTextprotoReader(tp)
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
@@ -1124,21 +1131,34 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
 // MaxBytesReader is similar to io.LimitReader but is intended for
 // limiting the size of incoming request bodies. In contrast to
 // io.LimitReader, MaxBytesReader's result is a ReadCloser, returns a
-// non-EOF error for a Read beyond the limit, and closes the
-// underlying reader when its Close method is called.
+// non-nil error of type *MaxBytesError for a Read beyond the limit,
+// and closes the underlying reader when its Close method is called.
 //
 // MaxBytesReader prevents clients from accidentally or maliciously
-// sending a large request and wasting server resources.
+// sending a large request and wasting server resources. If possible,
+// it tells the ResponseWriter to close the connection after the limit
+// has been reached.
 func MaxBytesReader(w ResponseWriter, r io.ReadCloser, n int64) io.ReadCloser {
 	if n < 0 { // Treat negative limits as equivalent to 0.
 		n = 0
 	}
-	return &maxBytesReader{w: w, r: r, n: n}
+	return &maxBytesReader{w: w, r: r, i: n, n: n}
+}
+
+// MaxBytesError is returned by MaxBytesReader when its read limit is exceeded.
+type MaxBytesError struct {
+	Limit int64
+}
+
+func (e *MaxBytesError) Error() string {
+	// Due to Hyrum's law, this text cannot be changed.
+	return "http: request body too large"
 }
 
 type maxBytesReader struct {
 	w   ResponseWriter
 	r   io.ReadCloser // underlying reader
+	i   int64         // max bytes initially, for MaxBytesError
 	n   int64         // max bytes remaining
 	err error         // sticky error
 }
@@ -1153,7 +1173,8 @@ func (l *maxBytesReader) Read(p []byte) (n int, err error) {
 	// If they asked for a 32KB byte read but only 5 bytes are
 	// remaining, no need to read 32KB. 6 bytes will answer the
 	// question of the whether we hit the limit or go past it.
-	if int64(len(p)) > l.n+1 {
+	// 0 < len(p) < 2^63
+	if int64(len(p))-1 > l.n {
 		p = p[:l.n+1]
 	}
 	n, err = l.r.Read(p)
@@ -1180,7 +1201,7 @@ func (l *maxBytesReader) Read(p []byte) (n int, err error) {
 	if res, ok := l.w.(requestTooLarger); ok {
 		res.requestTooLarge()
 	}
-	l.err = errors.New("http: request body too large")
+	l.err = &MaxBytesError{l.i}
 	return n, l.err
 }
 

@@ -7,6 +7,7 @@ package base
 import (
 	"fmt"
 	"internal/buildcfg"
+	"internal/types/errors"
 	"os"
 	"runtime/debug"
 	"sort"
@@ -36,7 +37,7 @@ func Errors() int {
 	return numErrors
 }
 
-// SyntaxErrors returns the number of syntax errors reported
+// SyntaxErrors returns the number of syntax errors reported.
 func SyntaxErrors() int {
 	return numSyntaxErrors
 }
@@ -105,11 +106,11 @@ func sameline(a, b src.XPos) bool {
 
 // Errorf reports a formatted error at the current line.
 func Errorf(format string, args ...interface{}) {
-	ErrorfAt(Pos, format, args...)
+	ErrorfAt(Pos, 0, format, args...)
 }
 
 // ErrorfAt reports a formatted error message at pos.
-func ErrorfAt(pos src.XPos, format string, args ...interface{}) {
+func ErrorfAt(pos src.XPos, code errors.Code, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 
 	if strings.HasPrefix(msg, "syntax error") {
@@ -161,7 +162,7 @@ func UpdateErrorDot(line string, name, expr string) {
 	}
 }
 
-// Warnf reports a formatted warning at the current line.
+// Warn reports a formatted warning at the current line.
 // In general the Go compiler does NOT generate warnings,
 // so this should be used only when the user has opted in
 // to additional output by setting a particular flag.

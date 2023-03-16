@@ -8,10 +8,12 @@ package runtime
 
 import (
 	"internal/abi"
+	"runtime/internal/atomic"
 	"unsafe"
 )
 
 // This is exported via linkname to assembly in runtime/cgo.
+//
 //go:linkname exit
 //go:nosplit
 //go:cgo_unsafe_args
@@ -45,6 +47,7 @@ func thrkill_trampoline()
 // mmap is used to do low-level memory allocation via mmap. Don't allow stack
 // splits, since this function (used by sysAlloc) is called in a lot of low-level
 // parts of the runtime and callers often assume it won't acquire any locks.
+//
 //go:nosplit
 func mmap(addr unsafe.Pointer, n uintptr, prot, flags, fd int32, off uint32) (unsafe.Pointer, int) {
 	args := struct {
@@ -246,7 +249,8 @@ func sigaltstack(new *stackt, old *stackt) {
 func sigaltstack_trampoline()
 
 // Not used on OpenBSD, but must be defined.
-func exitThread(wait *uint32) {
+func exitThread(wait *atomic.Uint32) {
+	throw("exitThread")
 }
 
 //go:nosplit

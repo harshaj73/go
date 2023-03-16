@@ -7,6 +7,7 @@
 package runtime
 
 import (
+	"runtime/internal/atomic"
 	"unsafe"
 )
 
@@ -25,6 +26,7 @@ func open(name *byte, mode, perm int32) int32        { panic("not implemented") 
 func closefd(fd int32) int32                         { panic("not implemented") }
 func read(fd int32, p unsafe.Pointer, n int32) int32 { panic("not implemented") }
 
+//go:wasmimport gojs runtime.wasmWrite
 //go:noescape
 func wasmWrite(fd uintptr, p unsafe.Pointer, n int32)
 
@@ -35,7 +37,7 @@ func usleep_no_g(usec uint32) {
 	usleep(usec)
 }
 
-func exitThread(wait *uint32)
+func exitThread(wait *atomic.Uint32)
 
 type mOS struct{}
 
@@ -49,13 +51,13 @@ func osyield_no_g() {
 const _SIGSEGV = 0xb
 
 func sigpanic() {
-	g := getg()
-	if !canpanic(g) {
+	gp := getg()
+	if !canpanic() {
 		throw("unexpected signal during runtime execution")
 	}
 
 	// js only invokes the exception handler for memory faults.
-	g.sig = _SIGSEGV
+	gp.sig = _SIGSEGV
 	panicmem()
 }
 
@@ -116,6 +118,7 @@ func crash() {
 	*(*int32)(nil) = 0
 }
 
+//go:wasmimport gojs runtime.getRandomData
 func getRandomData(r []byte)
 
 func goenvs() {
@@ -126,9 +129,10 @@ func initsig(preinit bool) {
 }
 
 // May run with m.p==nil, so write barriers are not allowed.
+//
 //go:nowritebarrier
 func newosproc(mp *m) {
-	panic("newosproc: not implemented")
+	throw("newosproc: not implemented")
 }
 
 func setProcessCPUProfiler(hz int32) {}

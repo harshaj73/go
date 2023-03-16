@@ -18,6 +18,7 @@ var (
 	libc_ioctl,
 	libc_setgid,
 	libc_setgroups,
+	libc_setrlimit,
 	libc_setsid,
 	libc_setuid,
 	libc_setpgid,
@@ -85,6 +86,7 @@ func syscall_chroot(path uintptr) (err uintptr) {
 }
 
 // like close, but must not split stack, for forkx.
+//
 //go:nosplit
 //go:linkname syscall_close
 func syscall_close(fd int32) int32 {
@@ -113,6 +115,7 @@ func syscall_execve(path, argv, envp uintptr) (err uintptr) {
 }
 
 // like exit, but must not split stack, for forkx.
+//
 //go:nosplit
 //go:linkname syscall_exit
 func syscall_exit(code uintptr) {
@@ -227,6 +230,19 @@ func syscall_setgroups(ngid, gid uintptr) (err uintptr) {
 		fn:   uintptr(unsafe.Pointer(&libc_setgroups)),
 		n:    2,
 		args: uintptr(unsafe.Pointer(&ngid)),
+	}
+	asmcgocall(unsafe.Pointer(&asmsysvicall6x), unsafe.Pointer(&call))
+	return call.err
+}
+
+//go:nosplit
+//go:linkname syscall_setrlimit
+//go:cgo_unsafe_args
+func syscall_setrlimit(which uintptr, lim unsafe.Pointer) (err uintptr) {
+	call := libcall{
+		fn:   uintptr(unsafe.Pointer(&libc_setrlimit)),
+		n:    2,
+		args: uintptr(unsafe.Pointer(&which)),
 	}
 	asmcgocall(unsafe.Pointer(&asmsysvicall6x), unsafe.Pointer(&call))
 	return call.err

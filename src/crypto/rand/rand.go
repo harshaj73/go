@@ -11,7 +11,7 @@ import "io"
 // Reader is a global, shared instance of a cryptographically
 // secure random number generator.
 //
-// On Linux, FreeBSD, Dragonfly and Solaris, Reader uses getrandom(2) if
+// On Linux, FreeBSD, Dragonfly, NetBSD and Solaris, Reader uses getrandom(2) if
 // available, /dev/urandom otherwise.
 // On OpenBSD and macOS, Reader uses getentropy(2).
 // On other Unix-like systems, Reader reads from /dev/urandom.
@@ -23,4 +23,22 @@ var Reader io.Reader
 // On return, n == len(b) if and only if err == nil.
 func Read(b []byte) (n int, err error) {
 	return io.ReadFull(Reader, b)
+}
+
+// batched returns a function that calls f to populate a []byte by chunking it
+// into subslices of, at most, readMax bytes.
+func batched(f func([]byte) error, readMax int) func([]byte) error {
+	return func(out []byte) error {
+		for len(out) > 0 {
+			read := len(out)
+			if read > readMax {
+				read = readMax
+			}
+			if err := f(out[:read]); err != nil {
+				return err
+			}
+			out = out[read:]
+		}
+		return nil
+	}
 }

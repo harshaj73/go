@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"go/constant"
 	"go/token"
+	"internal/types/errors"
 	"math"
 	"math/big"
 	"strings"
@@ -34,10 +35,7 @@ func roundFloat(v constant.Value, sz int64) constant.Value {
 // truncate float literal fv to 32-bit or 64-bit precision
 // according to type; return truncated value.
 func truncfltlit(v constant.Value, t *types.Type) constant.Value {
-	if t.IsUntyped() || overflow(v, t) {
-		// If there was overflow, simply continuing would set the
-		// value to Inf which in turn would lead to spurious follow-on
-		// errors. Avoid this by returning the existing value.
+	if t.IsUntyped() {
 		return v
 	}
 
@@ -48,10 +46,7 @@ func truncfltlit(v constant.Value, t *types.Type) constant.Value {
 // precision, according to type; return truncated value. In case of
 // overflow, calls Errorf but does not truncate the input value.
 func trunccmplxlit(v constant.Value, t *types.Type) constant.Value {
-	if t.IsUntyped() || overflow(v, t) {
-		// If there was overflow, simply continuing would set the
-		// value to Inf which in turn would lead to spurious follow-on
-		// errors. Avoid this by returning the existing value.
+	if t.IsUntyped() {
 		return v
 	}
 
@@ -98,10 +93,7 @@ func convlit1(n ir.Node, t *types.Type, explicit bool, context func() string) ir
 		}
 		n = ir.Copy(n)
 		if t == nil {
-			base.Errorf("use of untyped nil")
-			n.SetDiag(true)
-			n.SetType(nil)
-			return n
+			base.Fatalf("use of untyped nil")
 		}
 
 		if !t.HasNil() {
@@ -199,13 +191,12 @@ func convlit1(n ir.Node, t *types.Type, explicit bool, context func() string) ir
 	}
 
 	if explicit {
-		base.Errorf("cannot convert %L to type %v", n, t)
+		base.Fatalf("cannot convert %L to type %v", n, t)
 	} else if context != nil {
-		base.Errorf("cannot use %L as type %v in %s", n, t, context())
+		base.Fatalf("cannot use %L as type %v in %s", n, t, context())
 	} else {
-		base.Errorf("cannot use %L as type %v", n, t)
+		base.Fatalf("cannot use %L as type %v", n, t)
 	}
-	n.SetDiag(true)
 
 	n.SetType(nil)
 	return n
@@ -255,7 +246,6 @@ func convertVal(v constant.Value, t *types.Type, explicit bool) constant.Value {
 		switch {
 		case t.IsInteger():
 			v = toint(v)
-			overflow(v, t)
 			return v
 		case t.IsFloat():
 			v = toflt(v)
@@ -277,9 +267,6 @@ func tocplx(v constant.Value) constant.Value {
 
 func toflt(v constant.Value) constant.Value {
 	if v.Kind() == constant.Complex {
-		if constant.Sign(constant.Imag(v)) != 0 {
-			base.Errorf("constant %v truncated to real", v)
-		}
 		v = constant.Real(v)
 	}
 
@@ -288,9 +275,6 @@ func toflt(v constant.Value) constant.Value {
 
 func toint(v constant.Value) constant.Value {
 	if v.Kind() == constant.Complex {
-		if constant.Sign(constant.Imag(v)) != 0 {
-			base.Errorf("constant %v truncated to integer", v)
-		}
 		v = constant.Real(v)
 	}
 
@@ -323,25 +307,6 @@ func toint(v constant.Value) constant.Value {
 	// Prevent follow-on errors.
 	// TODO(mdempsky): Use constant.MakeUnknown() instead.
 	return constant.MakeInt64(1)
-}
-
-// overflow reports whether constant value v is too large
-// to represent with type t, and emits an error message if so.
-func overflow(v constant.Value, t *types.Type) bool {
-	// v has already been converted
-	// to appropriate form for t.
-	if t.IsUntyped() {
-		return false
-	}
-	if v.Kind() == constant.Int && constant.BitLen(v) > ir.ConstPrec {
-		base.Errorf("integer too large")
-		return true
-	}
-	if ir.ConstOverflow(v, t) {
-		base.Errorf("constant %v overflows %v", types.FmtConst(v, false), t)
-		return true
-	}
-	return false
 }
 
 func tostr(v constant.Value) constant.Value {
@@ -603,7 +568,7 @@ func OrigConst(n ir.Node, v constant.Value) ir.Node {
 		if what == "" {
 			base.Fatalf("unexpected overflow: %v", n.Op())
 		}
-		base.ErrorfAt(n.Pos(), "constant %v overflow", what)
+		base.ErrorfAt(n.Pos(), errors.NumericOverflow, "constant %v overflow", what)
 		n.SetType(nil)
 		return n
 	}
@@ -624,7 +589,8 @@ func OrigInt(n ir.Node, v int64) ir.Node {
 // get the same type going out.
 // force means must assign concrete (non-ideal) type.
 // The results of defaultlit2 MUST be assigned back to l and r, e.g.
-// 	n.Left, n.Right = defaultlit2(n.Left, n.Right, force)
+//
+//	n.Left, n.Right = defaultlit2(n.Left, n.Right, force)
 func defaultlit2(l ir.Node, r ir.Node, force bool) (ir.Node, ir.Node) {
 	if l.Type() == nil || r.Type() == nil {
 		return l, r
@@ -737,35 +703,44 @@ func IndexConst(n ir.Node) int64 {
 	return ir.IntVal(types.Types[types.TINT], v)
 }
 
+// callOrChan reports whether n is a call or channel operation.
+func callOrChan(n ir.Node) bool {
+	switch n.Op() {
+	case ir.OAPPEND,
+		ir.OCALL,
+		ir.OCALLFUNC,
+		ir.OCALLINTER,
+		ir.OCALLMETH,
+		ir.OCAP,
+		ir.OCLEAR,
+		ir.OCLOSE,
+		ir.OCOMPLEX,
+		ir.OCOPY,
+		ir.ODELETE,
+		ir.OIMAG,
+		ir.OLEN,
+		ir.OMAKE,
+		ir.ONEW,
+		ir.OPANIC,
+		ir.OPRINT,
+		ir.OPRINTN,
+		ir.OREAL,
+		ir.ORECOVER,
+		ir.ORECV,
+		ir.OUNSAFEADD,
+		ir.OUNSAFESLICE,
+		ir.OUNSAFESLICEDATA,
+		ir.OUNSAFESTRING,
+		ir.OUNSAFESTRINGDATA:
+		return true
+	}
+	return false
+}
+
 // anyCallOrChan reports whether n contains any calls or channel operations.
 func anyCallOrChan(n ir.Node) bool {
 	return ir.Any(n, func(n ir.Node) bool {
-		switch n.Op() {
-		case ir.OAPPEND,
-			ir.OCALL,
-			ir.OCALLFUNC,
-			ir.OCALLINTER,
-			ir.OCALLMETH,
-			ir.OCAP,
-			ir.OCLOSE,
-			ir.OCOMPLEX,
-			ir.OCOPY,
-			ir.ODELETE,
-			ir.OIMAG,
-			ir.OLEN,
-			ir.OMAKE,
-			ir.ONEW,
-			ir.OPANIC,
-			ir.OPRINT,
-			ir.OPRINTN,
-			ir.OREAL,
-			ir.ORECOVER,
-			ir.ORECV,
-			ir.OUNSAFEADD,
-			ir.OUNSAFESLICE:
-			return true
-		}
-		return false
+		return callOrChan(n)
 	})
 }
 
@@ -802,6 +777,18 @@ func evalunsafe(n ir.Node) int64 {
 		// first to track it correctly.
 		sel.X = Expr(sel.X)
 		sbase := sel.X
+
+		// Implicit dot may already be resolved for instantiating generic function. So we
+		// need to remove any implicit dot until we reach the first non-implicit one, it's
+		// the right base selector. See issue #53137.
+		var clobberBase func(n ir.Node) ir.Node
+		clobberBase = func(n ir.Node) ir.Node {
+			if sel, ok := n.(*ir.SelectorExpr); ok && sel.Implicit() {
+				return clobberBase(sel.X)
+			}
+			return n
+		}
+		sbase = clobberBase(sbase)
 
 		tsel := Expr(sel)
 		n.X = tsel

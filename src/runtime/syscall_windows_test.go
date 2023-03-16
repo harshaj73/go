@@ -5,7 +5,6 @@
 package runtime_test
 
 import (
-	"bytes"
 	"fmt"
 	"internal/abi"
 	"internal/syscall/windows/sysdll"
@@ -469,6 +468,7 @@ func sum5andPair(i1, i2, i3, i4, i5 uint8Pair) uintptr {
 // that insufficient spill slots allocated (according to the ABI)
 // may cause compiler-generated spills to clobber the return PC.
 // Then, the GC stack scanning will catch that.
+//
 //go:registerparams
 func sum9andGC(i1, i2, i3, i4, i5, i6, i7, i8, i9 uint32) uintptr {
 	runtime.GC()
@@ -628,7 +628,7 @@ func TestOutputDebugString(t *testing.T) {
 }
 
 func TestRaiseException(t *testing.T) {
-	if testenv.Builder() == "windows-amd64-2012" {
+	if strings.HasPrefix(testenv.Builder(), "windows-amd64-2012") {
 		testenv.SkipFlaky(t, 49681)
 	}
 	o := runTestProg(t, "testprog", "RaiseException")
@@ -1043,7 +1043,7 @@ func TestNumCPU(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestNumCPU")
 	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
-	var buf bytes.Buffer
+	var buf strings.Builder
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: _CREATE_SUSPENDED}
@@ -1053,7 +1053,7 @@ func TestNumCPU(t *testing.T) {
 	}
 	defer func() {
 		err = cmd.Wait()
-		childOutput := string(buf.Bytes())
+		childOutput := buf.String()
 		if err != nil {
 			t.Fatalf("child failed: %v: %v", err, childOutput)
 		}
@@ -1164,10 +1164,7 @@ uintptr_t cfunc(void) {
 	dll, err = syscall.LoadDLL(name)
 	if err == nil {
 		dll.Release()
-		if wantLoadLibraryEx() {
-			t.Fatalf("Bad: insecure load of DLL by base name %q before sysdll registration: %v", name, err)
-		}
-		t.Skip("insecure load of DLL, but expected")
+		t.Fatalf("Bad: insecure load of DLL by base name %q before sysdll registration: %v", name, err)
 	}
 }
 
@@ -1211,24 +1208,6 @@ func TestBigStackCallbackSyscall(t *testing.T) {
 	if !ok {
 		t.Fatalf("callback not called")
 	}
-}
-
-// wantLoadLibraryEx reports whether we expect LoadLibraryEx to work for tests.
-func wantLoadLibraryEx() bool {
-	return testenv.Builder() == "windows-amd64-gce" || testenv.Builder() == "windows-386-gce"
-}
-
-func TestLoadLibraryEx(t *testing.T) {
-	use, have, flags := runtime.LoadLibraryExStatus()
-	if use {
-		return // success.
-	}
-	if wantLoadLibraryEx() {
-		t.Fatalf("Expected LoadLibraryEx+flags to be available. (LoadLibraryEx=%v; flags=%v)",
-			have, flags)
-	}
-	t.Skipf("LoadLibraryEx not usable, but not expected. (LoadLibraryEx=%v; flags=%v)",
-		have, flags)
 }
 
 var (

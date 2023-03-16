@@ -12,6 +12,7 @@
 #include "go_tls.h"
 #include "textflag.h"
 #include "asm_ppc64x.h"
+#include "cgo/abi_ppc64x.h"
 
 #define SYS_exit		  1
 #define SYS_read		  3
@@ -21,7 +22,6 @@
 #define SYS_getpid		 20
 #define SYS_kill		 37
 #define SYS_brk			 45
-#define SYS_fcntl		 55
 #define SYS_mmap		 90
 #define SYS_munmap		 91
 #define SYS_setitimer		104
@@ -38,15 +38,11 @@
 #define SYS_futex		221
 #define SYS_sched_getaffinity	223
 #define SYS_exit_group		234
-#define SYS_epoll_create	236
-#define SYS_epoll_ctl		237
-#define SYS_epoll_wait		238
 #define SYS_timer_create	240
 #define SYS_timer_settime	241
 #define SYS_timer_delete	244
 #define SYS_clock_gettime	246
 #define SYS_tgkill		250
-#define SYS_epoll_create1	315
 #define SYS_pipe2		317
 
 TEXT runtime·exit(SB),NOSPLIT|NOFRAME,$0-4
@@ -54,7 +50,7 @@ TEXT runtime·exit(SB),NOSPLIT|NOFRAME,$0-4
 	SYSCALL	$SYS_exit_group
 	RET
 
-// func exitThread(wait *uint32)
+// func exitThread(wait *atomic.Uint32)
 TEXT runtime·exitThread(SB),NOSPLIT|NOFRAME,$0-8
 	MOVD	wait+0(FP), R1
 	// We're done using the stack.
@@ -111,16 +107,22 @@ TEXT runtime·pipe2(SB),NOSPLIT|NOFRAME,$0-20
 	MOVW	R3, errno+16(FP)
 	RET
 
+// func usleep(usec uint32)
 TEXT runtime·usleep(SB),NOSPLIT,$16-4
 	MOVW	usec+0(FP), R3
-	MOVD	R3, R5
-	MOVW	$1000000, R4
-	DIVD	R4, R3
-	MOVD	R3, 8(R1)
-	MOVW	$1000, R4
-	MULLD	R3, R4
-	SUB	R4, R5
-	MOVD	R5, 16(R1)
+
+	// Use magic constant 0x8637bd06 and shift right 51
+	// to perform usec/1000000.
+	MOVD	$0x8637bd06, R4
+	MULLD	R3, R4, R4	// Convert usec to S.
+	SRD	$51, R4, R4
+	MOVD	R4, 8(R1)	// Store to tv_sec
+
+	MOVD	$1000000, R5
+	MULLW	R4, R5, R5	// Convert tv_sec back into uS
+	SUB	R5, R3, R5	// Compute remainder uS.
+	MULLD	$1000, R5, R5	// Convert to nsec
+	MOVD	R5, 16(R1)	// Store to tv_nsec
 
 	// nanosleep(&ts, 0)
 	ADD	$8, R1, R3
@@ -459,7 +461,7 @@ TEXT runtime·sigtramp(SB),NOSPLIT|NOFRAME,$0
 	DWORD	$sigtramp<>(SB)
 	DWORD	$0
 	DWORD	$0
-TEXT sigtramp<>(SB),NOSPLIT|NOFRAME,$0
+TEXT sigtramp<>(SB),NOSPLIT|NOFRAME|TOPFRAME,$0
 #endif
 	// Start with standard C stack frame layout and linkage.
 	MOVD    LR, R0
@@ -632,11 +634,11 @@ TEXT sigtramp<>(SB),NOSPLIT|NOFRAME,$0
 TEXT runtime·cgoSigtramp(SB),NOSPLIT|NOFRAME,$0
 	// The stack unwinder, presumably written in C, may not be able to
 	// handle Go frame correctly. So, this function is NOFRAME, and we
-	// save/restore LR manually.
+	// save/restore LR manually, and obey ELFv2 calling conventions.
 	MOVD	LR, R10
 
-	// We're coming from C code, initialize essential registers.
-	CALL	runtime·reginit(SB)
+	// We're coming from C code, initialize R0
+	MOVD	$0, R0
 
 	// If no traceback function, do usual sigtramp.
 	MOVD	runtime·cgoTraceback(SB), R6
@@ -649,15 +651,18 @@ TEXT runtime·cgoSigtramp(SB),NOSPLIT|NOFRAME,$0
 	CMP	$0, R6
 	BEQ	sigtramp
 
-	// Set up g register.
-	CALL	runtime·load_g(SB)
+	// Inspect the g in TLS without clobbering R30/R31 via runtime.load_g.
+        MOVD    runtime·tls_g(SB), R9
+        MOVD    0(R9), R9
 
 	// Figure out if we are currently in a cgo call.
 	// If not, just do usual sigtramp.
 	// compared to ARM64 and others.
-	CMP	$0, g
+	CMP	$0, R9
 	BEQ	sigtrampnog // g == nil
-	MOVD	g_m(g), R6
+
+	// g is not nil. Check further.
+	MOVD	g_m(R9), R6
 	CMP	$0, R6
 	BEQ	sigtramp    // g.m == nil
 	MOVW	m_ncgo(R6), R7
@@ -730,13 +735,39 @@ TEXT cgoSigtramp<>(SB),NOSPLIT,$0
 	JMP	sigtramp<>(SB)
 #endif
 
-TEXT runtime·sigprofNonGoWrapper<>(SB),NOSPLIT,$0
-	// We're coming from C code, set up essential register, then call sigprofNonGo.
-	CALL	runtime·reginit(SB)
-	MOVW	R3, FIXED_FRAME+0(R1)	// sig
-	MOVD	R4, FIXED_FRAME+8(R1)	// info
-	MOVD	R5, FIXED_FRAME+16(R1)	// ctx
-	CALL	runtime·sigprofNonGo(SB)
+// Used by cgoSigtramp to inspect without clobbering R30/R31 via runtime.load_g.
+GLOBL runtime·tls_g+0(SB), TLSBSS+DUPOK, $8
+
+TEXT runtime·sigprofNonGoWrapper<>(SB),NOSPLIT|NOFRAME,$0
+	// This is called from C code. Callee save registers must be saved.
+	// R3,R4,R5 hold arguments.
+	// Save LR into R0 and stack a big frame.
+	MOVD	LR, R0
+	MOVD	R0, 16(R1)
+	MOVW	CR, R0
+	MOVD	R0, 8(R1)
+	// Don't save a back chain pointer when calling into Go. It will be overwritten.
+	// Go stores LR where ELF stores a back chain pointer.  And, allocate 64B for
+	// FIXED_FRAME and 24B argument space, rounded up to a 16 byte boundary.
+	ADD	$-(64+SAVE_ALL_REG_SIZE), R1
+
+	SAVE_GPR(64)
+	SAVE_FPR(64+SAVE_GPR_SIZE)
+	SAVE_VR(64+SAVE_GPR_SIZE+SAVE_FPR_SIZE, R6)
+
+	MOVD	$0, R0
+	CALL	runtime·sigprofNonGo<ABIInternal>(SB)
+
+	RESTORE_GPR(64)
+	RESTORE_FPR(64+SAVE_GPR_SIZE)
+	RESTORE_VR(64+SAVE_GPR_SIZE+SAVE_FPR_SIZE, R6)
+
+	// Clear frame, restore LR, return
+	ADD 	$(64+SAVE_ALL_REG_SIZE), R1
+	MOVD	16(R1), R0
+	MOVD	R0, LR
+	MOVD	8(R1), R0
+	MOVW	R0, CR
 	RET
 
 TEXT runtime·mmap(SB),NOSPLIT|NOFRAME,$0
@@ -874,55 +905,6 @@ TEXT runtime·sched_getaffinity(SB),NOSPLIT|NOFRAME,$0
 	BVC	2(PC)
 	NEG	R3	// caller expects negative errno
 	MOVW	R3, ret+24(FP)
-	RET
-
-// int32 runtime·epollcreate(int32 size);
-TEXT runtime·epollcreate(SB),NOSPLIT|NOFRAME,$0
-	MOVW    size+0(FP), R3
-	SYSCALL	$SYS_epoll_create
-	BVC	2(PC)
-	NEG	R3	// caller expects negative errno
-	MOVW	R3, ret+8(FP)
-	RET
-
-// int32 runtime·epollcreate1(int32 flags);
-TEXT runtime·epollcreate1(SB),NOSPLIT|NOFRAME,$0
-	MOVW	flags+0(FP), R3
-	SYSCALL	$SYS_epoll_create1
-	BVC	2(PC)
-	NEG	R3	// caller expects negative errno
-	MOVW	R3, ret+8(FP)
-	RET
-
-// func epollctl(epfd, op, fd int32, ev *epollEvent) int
-TEXT runtime·epollctl(SB),NOSPLIT|NOFRAME,$0
-	MOVW	epfd+0(FP), R3
-	MOVW	op+4(FP), R4
-	MOVW	fd+8(FP), R5
-	MOVD	ev+16(FP), R6
-	SYSCALL	$SYS_epoll_ctl
-	NEG	R3	// caller expects negative errno
-	MOVW	R3, ret+24(FP)
-	RET
-
-// int32 runtime·epollwait(int32 epfd, EpollEvent *ev, int32 nev, int32 timeout);
-TEXT runtime·epollwait(SB),NOSPLIT|NOFRAME,$0
-	MOVW	epfd+0(FP), R3
-	MOVD	ev+8(FP), R4
-	MOVW	nev+16(FP), R5
-	MOVW	timeout+20(FP), R6
-	SYSCALL	$SYS_epoll_wait
-	BVC	2(PC)
-	NEG	R3	// caller expects negative errno
-	MOVW	R3, ret+24(FP)
-	RET
-
-// void runtime·closeonexec(int32 fd);
-TEXT runtime·closeonexec(SB),NOSPLIT|NOFRAME,$0
-	MOVW    fd+0(FP), R3  // fd
-	MOVD    $2, R4  // F_SETFD
-	MOVD    $1, R5  // FD_CLOEXEC
-	SYSCALL	$SYS_fcntl
 	RET
 
 // func sbrk0() uintptr

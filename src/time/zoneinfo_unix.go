@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build aix || (darwin && !ios) || dragonfly || freebsd || (linux && !android) || netbsd || openbsd || solaris
+//go:build unix && !ios && !android
 
 // Parse "zoneinfo" time zone file.
 // This is a fairly standard file format used on OS X, Linux, BSD, Sun, and others.
@@ -16,11 +16,13 @@ import (
 )
 
 // Many systems use /usr/share/zoneinfo, Solaris 2 has
-// /usr/share/lib/zoneinfo, IRIX 6 has /usr/lib/locale/TZ.
+// /usr/share/lib/zoneinfo, IRIX 6 has /usr/lib/locale/TZ,
+// NixOS has /etc/zoneinfo.
 var platformZoneSources = []string{
 	"/usr/share/zoneinfo/",
 	"/usr/share/lib/zoneinfo/",
 	"/usr/lib/locale/TZ/",
+	"/etc/zoneinfo",
 }
 
 func initLocal() {

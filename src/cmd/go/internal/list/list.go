@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package list implements the ``go list'' command.
+// Package list implements the “go list” command.
 package list
 
 import (
@@ -52,44 +52,45 @@ syntax of package template. The default output is equivalent
 to -f '{{.ImportPath}}'. The struct being passed to the template is:
 
     type Package struct {
-        Dir           string   // directory containing package sources
-        ImportPath    string   // import path of package in dir
-        ImportComment string   // path in import comment on package statement
-        Name          string   // package name
-        Doc           string   // package documentation string
-        Target        string   // install path
-        Shlib         string   // the shared library that contains this package (only set when -linkshared)
-        Goroot        bool     // is this package in the Go root?
-        Standard      bool     // is this package part of the standard Go library?
-        Stale         bool     // would 'go install' do anything for this package?
-        StaleReason   string   // explanation for Stale==true
-        Root          string   // Go root or Go path dir containing this package
-        ConflictDir   string   // this directory shadows Dir in $GOPATH
-        BinaryOnly    bool     // binary-only package (no longer supported)
-        ForTest       string   // package is only for use in named test
-        Export        string   // file containing export data (when using -export)
-        BuildID       string   // build ID of the compiled package (when using -export)
-        Module        *Module  // info about package's containing module, if any (can be nil)
-        Match         []string // command-line patterns matching this package
-        DepOnly       bool     // package is only a dependency, not explicitly listed
+        Dir            string   // directory containing package sources
+        ImportPath     string   // import path of package in dir
+        ImportComment  string   // path in import comment on package statement
+        Name           string   // package name
+        Doc            string   // package documentation string
+        Target         string   // install path
+        Shlib          string   // the shared library that contains this package (only set when -linkshared)
+        Goroot         bool     // is this package in the Go root?
+        Standard       bool     // is this package part of the standard Go library?
+        Stale          bool     // would 'go install' do anything for this package?
+        StaleReason    string   // explanation for Stale==true
+        Root           string   // Go root or Go path dir containing this package
+        ConflictDir    string   // this directory shadows Dir in $GOPATH
+        BinaryOnly     bool     // binary-only package (no longer supported)
+        ForTest        string   // package is only for use in named test
+        Export         string   // file containing export data (when using -export)
+        BuildID        string   // build ID of the compiled package (when using -export)
+        Module         *Module  // info about package's containing module, if any (can be nil)
+        Match          []string // command-line patterns matching this package
+        DepOnly        bool     // package is only a dependency, not explicitly listed
+        DefaultGODEBUG string  // default GODEBUG setting, for main packages
 
         // Source files
-        GoFiles         []string   // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
-        CgoFiles        []string   // .go source files that import "C"
-        CompiledGoFiles []string   // .go files presented to compiler (when using -compiled)
-        IgnoredGoFiles  []string   // .go source files ignored due to build constraints
+        GoFiles           []string   // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
+        CgoFiles          []string   // .go source files that import "C"
+        CompiledGoFiles   []string   // .go files presented to compiler (when using -compiled)
+        IgnoredGoFiles    []string   // .go source files ignored due to build constraints
         IgnoredOtherFiles []string // non-.go source files ignored due to build constraints
-        CFiles          []string   // .c source files
-        CXXFiles        []string   // .cc, .cxx and .cpp source files
-        MFiles          []string   // .m source files
-        HFiles          []string   // .h, .hh, .hpp and .hxx source files
-        FFiles          []string   // .f, .F, .for and .f90 Fortran source files
-        SFiles          []string   // .s source files
-        SwigFiles       []string   // .swig files
-        SwigCXXFiles    []string   // .swigcxx files
-        SysoFiles       []string   // .syso object files to add to archive
-        TestGoFiles     []string   // _test.go files in package
-        XTestGoFiles    []string   // _test.go files outside package
+        CFiles            []string   // .c source files
+        CXXFiles          []string   // .cc, .cxx and .cpp source files
+        MFiles            []string   // .m source files
+        HFiles            []string   // .h, .hh, .hpp and .hxx source files
+        FFiles            []string   // .f, .F, .for and .f90 Fortran source files
+        SFiles            []string   // .s source files
+        SwigFiles         []string   // .swig files
+        SwigCXXFiles      []string   // .swigcxx files
+        SysoFiles         []string   // .syso object files to add to archive
+        TestGoFiles       []string   // _test.go files in package
+        XTestGoFiles      []string   // _test.go files outside package
 
         // Embedded files
         EmbedPatterns      []string // //go:embed patterns
@@ -187,10 +188,13 @@ a non-nil Error field; other information may or may not be missing
 (zeroed).
 
 The -export flag causes list to set the Export field to the name of a
-file containing up-to-date export information for the given package.
+file containing up-to-date export information for the given package,
+and the BuildID field to the build ID of the compiled package.
 
 The -find flag causes list to identify the named packages but not
 resolve their dependencies: the Imports and Deps lists will be empty.
+With the -find flag, the -deps, -test and -export commands cannot be
+used.
 
 The -test flag causes list to report not only the named packages
 but also their test binaries (for packages with tests), to convey to
@@ -221,19 +225,23 @@ When listing modules, the -f flag still specifies a format template
 applied to a Go struct, but now a Module struct:
 
     type Module struct {
-        Path      string       // module path
-        Version   string       // module version
-        Versions  []string     // available module versions (with -versions)
-        Replace   *Module      // replaced by this module
-        Time      *time.Time   // time version was created
-        Update    *Module      // available update, if any (with -u)
-        Main      bool         // is this the main module?
-        Indirect  bool         // is this module only an indirect dependency of main module?
-        Dir       string       // directory holding files for this module, if any
-        GoMod     string       // path to go.mod file used when loading this module, if any
-        GoVersion string       // go version used in module
-        Retracted string       // retraction information, if any (with -retracted or -u)
-        Error     *ModuleError // error loading module
+        Path       string        // module path
+        Query      string        // version query corresponding to this version
+        Version    string        // module version
+        Versions   []string      // available module versions
+        Replace    *Module       // replaced by this module
+        Time       *time.Time    // time version was created
+        Update     *Module       // available update (with -u)
+        Main       bool          // is this the main module?
+        Indirect   bool          // module is only indirectly needed by main module
+        Dir        string        // directory holding local copy of files, if any
+        GoMod      string        // path to go.mod file describing module, if any
+        GoVersion  string        // go version used in module
+        Retracted  []string      // retraction information, if any (with -retracted or -u)
+        Deprecated string        // deprecation message, if any (with -u)
+        Error      *ModuleError  // error loading module
+        Origin     any           // provenance of module
+        Reuse      bool          // reuse of old module info is safe
     }
 
     type ModuleError struct {
@@ -310,6 +318,16 @@ that must be a module path or query and returns the specified
 module as a Module struct. If an error occurs, the result will
 be a Module struct with a non-nil Error field.
 
+When using -m, the -reuse=old.json flag accepts the name of file containing
+the JSON output of a previous 'go list -m -json' invocation with the
+same set of modifier flags (such as -u, -retracted, and -versions).
+The go command may use this file to determine that a module is unchanged
+since the previous invocation and avoid redownloading information about it.
+Modules that are not redownloaded will be marked in the new output by
+setting the Reuse field to true. Normally the module cache provides this
+kind of reuse automatically; the -reuse flag can be useful on systems that
+do not preserve the module cache.
+
 For more about build flags, see 'go help build'.
 
 For more about specifying packages, see 'go help packages'.
@@ -321,6 +339,9 @@ For more about modules, see https://golang.org/ref/mod.
 func init() {
 	CmdList.Run = runList // break init cycle
 	work.AddBuildFlags(CmdList, work.DefaultBuildFlags)
+	if cfg.Experiment != nil && cfg.Experiment.CoverageRedesign {
+		work.AddCoverFlags(CmdList, nil)
+	}
 	CmdList.Flag.Var(&listJsonFields, "json", "")
 }
 
@@ -335,6 +356,7 @@ var (
 	listJsonFields jsonFlag // If not empty, only output these fields.
 	listM          = CmdList.Flag.Bool("m", false, "")
 	listRetracted  = CmdList.Flag.Bool("retracted", false, "")
+	listReuse      = CmdList.Flag.String("reuse", "", "")
 	listTest       = CmdList.Flag.Bool("test", false, "")
 	listU          = CmdList.Flag.Bool("u", false, "")
 	listVersions   = CmdList.Flag.Bool("versions", false, "")
@@ -393,8 +415,14 @@ var nl = []byte{'\n'}
 func runList(ctx context.Context, cmd *base.Command, args []string) {
 	modload.InitWorkfile()
 
-	if *listFmt != "" && listJson == true {
+	if *listFmt != "" && listJson {
 		base.Fatalf("go list -f cannot be used with -json")
+	}
+	if *listReuse != "" && !*listM {
+		base.Fatalf("go list -reuse cannot be used without -m")
+	}
+	if *listReuse != "" && modload.HasModRoot() {
+		base.Fatalf("go list -reuse cannot be used inside a module")
 	}
 
 	work.BuildInit()
@@ -420,7 +448,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 				// Clear all non-requested fields.
 				for i := 0; i < v.NumField(); i++ {
 					if !listJsonFields.needAny(v.Type().Field(i).Name) {
-						v.Field(i).Set(reflect.Zero(v.Type().Field(i).Type))
+						v.Field(i).SetZero()
 					}
 				}
 			}
@@ -530,7 +558,10 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 				mode |= modload.ListRetractedVersions
 			}
 		}
-		mods, err := modload.ListModules(ctx, args, mode)
+		if *listReuse != "" && len(args) == 0 {
+			base.Fatalf("go: list -m -reuse only has an effect with module@version arguments")
+		}
+		mods, err := modload.ListModules(ctx, args, mode, *listReuse)
 		if !*listE {
 			for _, m := range mods {
 				if m.Error != nil {
@@ -563,11 +594,23 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 	if *listFind && *listTest {
 		base.Fatalf("go list -test cannot be used with -find")
 	}
+	if *listFind && *listExport {
+		base.Fatalf("go list -export cannot be used with -find")
+	}
 
 	pkgOpts := load.PackageOpts{
 		IgnoreImports:   *listFind,
 		ModResolveTests: *listTest,
-		LoadVCS:         cfg.BuildBuildvcs,
+		AutoVCS:         true,
+		// SuppressDeps is set if the user opts to explicitly ask for the json fields they
+		// need, don't ask for Deps or DepsErrors. It's not set when using a template string,
+		// even if *listFmt doesn't contain .Deps because Deps are used to find import cycles
+		// for test variants of packages and users who have been providing format strings
+		// might not expect those errors to stop showing up.
+		// See issue #52443.
+		SuppressDeps:       !listJsonFields.needAny("Deps", "DepsErrors"),
+		SuppressBuildInfo:  !listJsonFields.needAny("Stale", "StaleReason"),
+		SuppressEmbedFiles: !listJsonFields.needAny("EmbedFiles", "TestEmbedFiles", "XTestEmbedFiles"),
 	}
 	pkgs := load.PackagesAndErrors(ctx, pkgOpts, args)
 	if !*listE {
@@ -656,8 +699,16 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 	// Do we need to run a build to gather information?
 	needStale := (listJson && listJsonFields.needAny("Stale", "StaleReason")) || strings.Contains(*listFmt, ".Stale")
 	if needStale || *listExport || *listCompiled {
-		var b work.Builder
-		b.Init()
+		b := work.NewBuilder("")
+		if *listE {
+			b.AllowErrors = true
+		}
+		defer func() {
+			if err := b.Close(); err != nil {
+				base.Fatalf("go: %v", err)
+			}
+		}()
+
 		b.IsCmdList = true
 		b.NeedExport = *listExport
 		b.NeedCompiledGoFiles = *listCompiled
@@ -682,19 +733,20 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		}
 	}
 
-	if *listTest {
+	if *listTest || (cfg.BuildPGO == "auto" && len(cmdline) > 1) {
 		all := pkgs
 		if !*listDeps {
 			all = loadPackageList(pkgs)
 		}
 		// Update import paths to distinguish the real package p
-		// from p recompiled for q.test.
+		// from p recompiled for q.test, or to distinguish between
+		// p compiled with different PGO profiles.
 		// This must happen only once the build code is done
 		// looking at import paths, because it will get very confused
 		// if it sees these.
 		old := make(map[string]string)
 		for _, p := range all {
-			if p.ForTest != "" {
+			if p.ForTest != "" || p.Internal.ForMain != "" {
 				new := p.Desc()
 				old[new] = p.ImportPath
 				p.ImportPath = new
@@ -705,7 +757,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		m := make(map[string]string)
 		for _, p := range all {
 			for _, p1 := range p.Internal.Imports {
-				if p1.ForTest != "" {
+				if p1.ForTest != "" || p1.Internal.ForMain != "" {
 					m[old[p1.ImportPath]] = p1.ImportPath
 				}
 			}
@@ -773,7 +825,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 			if *listRetracted {
 				mode |= modload.ListRetracted
 			}
-			rmods, err := modload.ListModules(ctx, args, mode)
+			rmods, err := modload.ListModules(ctx, args, mode, *listReuse)
 			if err != nil && !*listE {
 				base.Errorf("go: %v", err)
 			}

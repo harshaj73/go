@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+//go:build unix
 
 package runtime_test
 
@@ -198,10 +198,12 @@ func TestPanicSystemstack(t *testing.T) {
 
 	// Traceback should have two testPanicSystemstackInternal's
 	// and two blockOnSystemStackInternal's.
-	if bytes.Count(tb, []byte("testPanicSystemstackInternal")) != 2 {
-		t.Fatal("traceback missing user stack:\n", string(tb))
-	} else if bytes.Count(tb, []byte("blockOnSystemStackInternal")) != 2 {
-		t.Fatal("traceback missing system stack:\n", string(tb))
+	userFunc := "testPanicSystemstackInternal"
+	sysFunc := "blockOnSystemStackInternal"
+	nUser := bytes.Count(tb, []byte(userFunc))
+	nSys := bytes.Count(tb, []byte(sysFunc))
+	if nUser != 2 || nSys != 2 {
+		t.Fatalf("want %d user stack frames in %s and %d system stack frames in %s, got %d and %d:\n%s", 2, userFunc, 2, sysFunc, nUser, nSys, string(tb))
 	}
 }
 
